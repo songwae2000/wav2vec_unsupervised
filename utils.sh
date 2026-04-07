@@ -5,14 +5,15 @@
 
 # Main directories
 #.... directories to add to root.......
-DIR_PATH="$HOME/wav2vec_unsupervised" # the root directory of the project
+DIR_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # auto-detect project root
 DATA_ROOT="$DIR_PATH/data" # a folder that stores all the data generated from pipeline
-FAIRSEQ_ROOT="$DIR_PATH/fairseq_" # the root directory of the fairseq repository
+FAIRSEQ_ROOT="$(dirname "$DIR_PATH")/fairseq_temp" # the root directory of the fairseq repository
 KENLM_ROOT="$DIR_PATH/kenlm/build/bin"  # Path to KenLM installation
-VENV_PATH="$DIR_PATH/venv"    # Path to virtual environment (optional)
+VENV_PATH="$DIR_PATH/venv310"    # Path to virtual environment (optional)
 RVAD_ROOT="$DIR_PATH/rVADfast/src/rVADfast" # the root directory of the rVADfast repository
 
 GANS_OUTPUT_PHONES="$DATA_ROOT/transcription_phones"
+TEST_REFS="$DATA_ROOT/test_refs"
 
 
 
@@ -28,13 +29,18 @@ OPENFST_PATH="$DIR_PATH/fairseq/examples/speech_recognition/kaldi/kaldi_initiali
 # Arguments/variables
 NEW_SAMPLE_PCT=0.5
 MIN_PHONES=3
-NEW_BATCH_SIZE=32
+NEW_BATCH_SIZE=1024
 PHONEMIZER="G2P"
 LANG="en"
 
-#models 
-FASTTEXT_LIB_MODEL="$DIR_PATH/lid_model/lid.176.bin"  # the path to the language identification model
-MODEL="$DIR_PATH/pre-trained/wav2vec_vox_new.pt" # the path to the pre-trained wav2vec model for audio feature extraction
+# Sample sizes (set to 0 or empty to use all data)
+NUM_TRAIN=${NUM_TRAIN:-100}
+NUM_VAL=${NUM_VAL:-20}
+NUM_TEST=${NUM_TEST:-20}
+
+#models
+FASTTEXT_LIB_MODEL="$DATA_ROOT/models/lid.176.bin"  # the path to the language identification model
+MODEL="$DATA_ROOT/models/wav2vec_vox_new.pt" # the path to the pre-trained wav2vec model for audio feature extraction
 
 # Dataset specifics
 DATASET_NAME="librispeech"
@@ -45,9 +51,10 @@ NONSIL_AUDIO="$DATA_ROOT/processed_audio/" #the directory that stores the audio 
 MANIFEST_NONSIL_DIR="$DATA_ROOT/manifests_nonsil" #the directory that stores the manifest files foe audio dataset with silence removed
 CLUSTERING_DIR="$DATA_ROOT/clustering/$DATASET_NAME"  #stores the output of audio processing, the psuedophonemes(cluster IDs), Audio features
 RESULTS_DIR="$DATA_ROOT/results/$DATASET_NAME" # Stores all the training information of the gans
-CHECKPOINT_DIR="$DATA_ROOT/checkpoints/$DATASET_NAME" # stores the progress checkpoint file which keeps track of processes implemented 
-LOG_DIR="$DATA_ROOT/logs/$DATASET_NAME" #stores the pipeline logs 
-TEXT_OUTPUT="$DATA_ROOT/text" # stores the processes output from the prepared text function 
+EVAL_OUTPUT="$RESULTS_DIR/eval_output" # stores the evaluation output (predictions)
+CHECKPOINT_DIR="$DATA_ROOT/checkpoints/$DATASET_NAME" # stores the progress checkpoint file which keeps track of processes implemented
+LOG_DIR="$DATA_ROOT/logs/$DATASET_NAME" #stores the pipeline logs
+TEXT_OUTPUT="$DATA_ROOT/text_output" # stores the processes output from the prepared text function
 
 
 # Checkpoint file to track progress
@@ -91,7 +98,7 @@ mark_in_progress() {
     local step="$1"
     # First remove any existing in-progress markers for this step
     if [ -f "$CHECKPOINT_FILE" ]; then
-        sed -i "/^$step:IN_PROGRESS$/d" "$CHECKPOINT_FILE"
+        sed -i '' "/^$step:IN_PROGRESS$/d" "$CHECKPOINT_FILE"
     fi
     echo "$step:IN_PROGRESS" >> "$CHECKPOINT_FILE"
     log "Marked step '$step' as in progress"

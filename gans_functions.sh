@@ -30,14 +30,15 @@ train_gans(){
    
 
    PYTHONPATH=$FAIRSEQ_ROOT PREFIX=w2v_unsup_gan_xp fairseq-hydra-train \
-    -m --config-dir "$FAIRSEQ_ROOT/examples/wav2vec/unsupervised/config/gan" \
+    --config-dir "$FAIRSEQ_ROOT/examples/wav2vec/unsupervised/config/gan" \
     --config-name w2vu \
     task.data="$CLUSTERING_DIR/precompute_pca512_cls128_mean_pooled" \
     task.text_data="$TEXT_OUTPUT/phones/" \
     task.kenlm_path="$TEXT_OUTPUT/phones/lm.phones.filtered.04.bin" \
     common.user_dir="$FAIRSEQ_ROOT/examples/wav2vec/unsupervised" \
-    model.code_penalty=6,10 model.gradient_penalty=0.5,1.0 \
-    model.smoothness_weight='1.5' 'common.seed=range(0,5)' \
+    model.code_penalty=6 model.gradient_penalty=1.0 \
+    model.smoothness_weight='1.5' common.seed=0 \
+    optimization.max_update=2000 \
     +optimizer.groups.generator.optimizer.lr="[0.00004]" \
     +optimizer.groups.discriminator.optimizer.lr="[0.00002]" \
     ~optimizer.groups.generator.optimizer.amsgrad \

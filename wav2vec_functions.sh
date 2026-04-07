@@ -27,7 +27,7 @@ fixing_sflux() {
         echo "Updating sflux() to return two values in $TARGET_FILE..."
         
         # Find and modify the return statement inside sflux()
-        sed -i '/def sflux/,/return/ s/^ *return .*/    return s_flatness, n_frames/' "$TARGET_FILE"
+        sed -i '' '/def sflux/,/return/ s/^ *return .*/    return s_flatness, n_frames/' "$TARGET_FILE"
         
         # Confirm the fix by printing the modified return statement
         echo "Updated return statement in sflux():"
@@ -51,7 +51,7 @@ replace_std_endl() {
     fi
 
     # Use sed to replace std::endl with \n and save the output
-    sed -i 's/std::endl/"\\n"/g' "$input_file"
+    sed -i '' 's/std::endl/"\\n"/g' "$input_file"
 
     echo "Replacement done in '$input_file'"
 }
@@ -62,7 +62,7 @@ replace_std_endl() {
 update_sample_pct(){
 # This regex matches '--sample-pct' followed by any whitespace and a number (integer or decimal)
 # and replaces it with '--sample-pct' followed by the new value.
-    sed -i.bak -E "s/(--sample-pct[[:space:]]+)[0-9]*\.?[0-9]+/\1${NEW_SAMPLE_PCT}/g" $PREPARE_AUDIO
+    sed -i.bak -E "s/(--sample-pct[[:space:]]+)[0-9]*\.?[0-9]+/\1${NEW_SAMPLE_PCT}/g" "$PREPARE_AUDIO"
     echo "Updated '--sample-pct' to ${NEW_SAMPLE_PCT} in 'prepare_audio'. Backup saved as 'prepare_audio.bak'."
 
 }
@@ -70,7 +70,7 @@ update_sample_pct(){
 # Update batch_size in the file 'prepare_audio'
 update_batch_size()
 {
-    sed -i.bak -E "s/(--batch-size[[:space:]]+)[0-9]+/\1${NEW_BATCH_SIZE}/g" $PREPARE_AUDIO
+    sed -i.bak -E "s/(--batch-size[[:space:]]+)[0-9]+/\1${NEW_BATCH_SIZE}/g" "$PREPARE_AUDIO"
     echo "Updated '--batch-size' to ${NEW_BATCH_SIZE} in 'prepare_audio'. Backup saved as 'prepare_audio.bak'."
 
 }
@@ -78,6 +78,70 @@ update_batch_size()
 
 
 # ==================== MAIN STEPS ====================
+
+# Helper to subsample a tsv manifest (avoids SIGPIPE with pipefail)
+_subsample_tsv() {
+    local tsv_file=$1
+    local n_samples=$2
+    local label=$3
+
+    if [ ! -f "$tsv_file" ]; then
+        log "No $label manifest found, skipping"
+        return 0
+    fi
+
+    local full_count=$(( $(wc -l < "$tsv_file") - 1 ))
+    if [ "$full_count" -le "$n_samples" ]; then
+        log "$label already <= $n_samples samples ($full_count), no subsampling needed"
+        return 0
+    fi
+
+    cp "$tsv_file" "${tsv_file%.tsv}_full_backup.tsv"
+    # Use awk to avoid SIGPIPE from tail|head with set -o pipefail
+    awk -v n="$n_samples" 'NR==1 || (NR>=2 && NR<=n+1)' "$tsv_file" > "${tsv_file}.tmp"
+    mv "${tsv_file}.tmp" "$tsv_file"
+    log "Subsampled $label: $full_count -> $n_samples"
+}
+
+# Step 0: Subsample manifests to reduce dataset size for faster iteration
+subsample_manifests() {
+    local step_name="subsample_manifests"
+
+    if is_completed "$step_name"; then
+        log "Skipping manifest subsampling (already completed)"
+        return 0
+    fi
+
+    log "Subsampling manifests: train=$NUM_TRAIN, val=$NUM_VAL, test=$NUM_TEST"
+    mark_in_progress "$step_name"
+
+    _subsample_tsv "$MANIFEST_DIR/train.tsv" "$NUM_TRAIN" "train"
+    _subsample_tsv "$MANIFEST_DIR/valid.tsv" "$NUM_VAL" "valid"
+    _subsample_tsv "$MANIFEST_DIR/test.tsv" "$NUM_TEST" "test"
+
+    mark_completed "$step_name"
+    log "Manifest subsampling completed"
+}
+
+# Subsample nonsil manifests (after silence removal recreates them from full dirs)
+subsample_nonsil_manifests() {
+    local step_name="subsample_nonsil_manifests"
+
+    if is_completed "$step_name"; then
+        log "Skipping nonsil manifest subsampling (already completed)"
+        return 0
+    fi
+
+    log "Subsampling nonsil manifests: train=$NUM_TRAIN, val=$NUM_VAL, test=$NUM_TEST"
+    mark_in_progress "$step_name"
+
+    _subsample_tsv "$MANIFEST_NONSIL_DIR/train.tsv" "$NUM_TRAIN" "nonsil_train"
+    _subsample_tsv "$MANIFEST_NONSIL_DIR/valid.tsv" "$NUM_VAL" "nonsil_valid"
+    _subsample_tsv "$MANIFEST_NONSIL_DIR/test.tsv" "$NUM_TEST" "nonsil_test"
+
+    mark_completed "$step_name"
+    log "Nonsil manifest subsampling completed"
+}
 
 # Step 1: Create data manifests
 # Step 1: Create data manifests - Modified Functions
@@ -173,9 +237,9 @@ create_manifests_test() {
     
     log "Creating Test data manifest..."
     mark_in_progress "$step_name"
-    MANIFEST_TEST_DIR=$DATA_ROOT/manifest_test
-    
-    mkdir -p $MANIFEST_TEST_DIR
+    MANIFEST_TEST_DIR="$DATA_ROOT/manifest_test"
+
+    mkdir -p "$MANIFEST_TEST_DIR"
 
     # Ensure the validation file potentially created here is removed or ignored later
     # Run the script to create train.tsv (and an empty valid.tsv)
@@ -186,8 +250,8 @@ create_manifests_test() {
         --valid-percent 0 # Force 100% to train.tsv
 
     # Check if the command was successful
-    cp -r $MANIFEST_TEST_DIR/train.tsv $MANIFEST_NONSIL_DIR/test.tsv
-    rm -rf $MANIFEST_TEST_DIR
+    cp -r "$MANIFEST_TEST_DIR/train.tsv" "$MANIFEST_DIR/test.tsv"
+    rm -rf "$MANIFEST_TEST_DIR"
     if [ $? -eq 0 ]; then
         # Optional: remove the empty valid.tsv if you want clarity
         # rm -f "$MANIFEST_DIR/valid.tsv"
@@ -200,23 +264,30 @@ create_manifests_test() {
 }
 
 # --- In your main function ---
-# Step 2: create vads files out of the audios 
-create_rVADfast() { 
-    
+# Step 2: create vads files out of the audios
+create_rVADfast() {
+
     local step_name="create_rVADfast"
-    # # fixing certain code errors in the rvads  
+    # # fixing certain code errors in the rvads
     fixing_sflux #this script changes the sflux function to return both ft and n_frames
 
     if is_completed "$step_name"; then
         log "Skipping audio silence removal (already completed)"
         return 0
     fi
-    
-    
+
+
     log "removing silence from audios"
     mark_in_progress "$step_name"
-    python "$DIR_PATH/vads.py" -r $RVAD_ROOT < "$MANIFEST_DIR/train.tsv" > "$MANIFEST_DIR/train.vads"
-    python "$DIR_PATH/vads.py" -r $RVAD_ROOT < "$MANIFEST_DIR/valid.tsv" > "$MANIFEST_DIR/valid.vads"
+    log "Running VAD on train ($(( $(wc -l < "$MANIFEST_DIR/train.tsv") - 1 )) files)..."
+    python "$DIR_PATH/vads.py" -r "$RVAD_ROOT" < "$MANIFEST_DIR/train.tsv" > "$MANIFEST_DIR/train.vads"
+    log "Running VAD on valid ($(( $(wc -l < "$MANIFEST_DIR/valid.tsv") - 1 )) files)..."
+    python "$DIR_PATH/vads.py" -r "$RVAD_ROOT" < "$MANIFEST_DIR/valid.tsv" > "$MANIFEST_DIR/valid.vads"
+    # Also create vads for test set if test manifest exists
+    if [ -f "$MANIFEST_DIR/test.tsv" ]; then
+        log "Running VAD on test ($(( $(wc -l < "$MANIFEST_DIR/test.tsv") - 1 )) files)..."
+        python "$DIR_PATH/vads.py" -r "$RVAD_ROOT" < "$MANIFEST_DIR/test.tsv" > "$MANIFEST_DIR/test.vads"
+    fi
     # Check if the command was successful
     if [ $? -eq 0 ]; then
         mark_completed "$step_name"
@@ -227,7 +298,7 @@ create_rVADfast() {
     fi
 }
 
-# Step 3: Remove silence from audios with vads files 
+# Step 3: Remove silence from audios with vads files
 remove_silence() {
 
     local step_name="remove_silence"
@@ -236,14 +307,18 @@ remove_silence() {
         log "Skipping audio silence removal1 (already completed)"
         return 0
     fi
-    
-    
+
+
     log "removing silence from audios1"
     mark_in_progress "$step_name"
 
     python "$FAIRSEQ_ROOT/examples/wav2vec/unsupervised/scripts/remove_silence.py" --tsv "$MANIFEST_DIR/train.tsv" --vads "$MANIFEST_DIR/train.vads" --out "$NONSIL_AUDIO/train"
     python "$FAIRSEQ_ROOT/examples/wav2vec/unsupervised/scripts/remove_silence.py" --tsv "$MANIFEST_DIR/valid.tsv" --vads "$MANIFEST_DIR/valid.vads" --out "$NONSIL_AUDIO/val"
-    
+    # Also remove silence from test set if available
+    if [ -f "$MANIFEST_DIR/test.vads" ]; then
+        python "$FAIRSEQ_ROOT/examples/wav2vec/unsupervised/scripts/remove_silence.py" --tsv "$MANIFEST_DIR/test.tsv" --vads "$MANIFEST_DIR/test.vads" --out "$NONSIL_AUDIO/test"
+    fi
+
     # Check if the command was successful
     if [ $? -eq 0 ]; then
         mark_completed "$step_name"
@@ -327,6 +402,84 @@ create_manifests_nonsil_val() {
     rm -rf "$TEMP_VAL_DIR"
 }
 
+create_manifests_nonsil_test() {
+    local step_name="create_manifests_nonsil_test"
+
+    if is_completed "$step_name"; then
+        log "Skipping nonsil test manifest creation (already completed)"
+        return 0
+    fi
+
+    if [ ! -d "$NONSIL_AUDIO/test" ]; then
+        log "No test audio found, skipping nonsil test manifest"
+        return 0
+    fi
+
+    log "Creating nonsil test manifests..."
+    mark_in_progress "$step_name"
+
+    local TEMP_TEST_DIR
+    TEMP_TEST_DIR=$(mktemp -d "$MANIFEST_NONSIL_DIR/test_manifest.XXXXXX")
+
+    python "$FAIRSEQ_ROOT/examples/wav2vec/wav2vec_manifest.py" \
+        "$NONSIL_AUDIO/test" \
+        --dest "$TEMP_TEST_DIR" \
+        --ext wav \
+        --valid-percent 0
+    local python_exit_code=$?
+
+    if [ $python_exit_code -eq 0 ]; then
+        if [ -f "$TEMP_TEST_DIR/train.tsv" ]; then
+            mv "$TEMP_TEST_DIR/train.tsv" "$MANIFEST_NONSIL_DIR/test.tsv"
+            log "Moved test manifest to $MANIFEST_NONSIL_DIR/test.tsv"
+            mark_completed "$step_name"
+            log "TEST nonsil manifest creation completed successfully"
+        else
+            log "ERROR: Expected train.tsv not found in temporary directory $TEMP_TEST_DIR"
+            rm -rf "$TEMP_TEST_DIR"
+            exit 1
+        fi
+    else
+        log "ERROR: TEST manifest creation failed (Python exit code: $python_exit_code)"
+        rm -rf "$TEMP_TEST_DIR"
+        exit 1
+    fi
+
+    rm -rf "$TEMP_TEST_DIR"
+}
+
+# Step 5.5: Generate ground-truth phoneme references for test set
+generate_test_refs() {
+    local step_name="generate_test_refs"
+
+    if is_completed "$step_name"; then
+        log "Skipping test reference generation (already completed)"
+        return 0
+    fi
+
+    if [ ! -f "$MANIFEST_NONSIL_DIR/test.tsv" ]; then
+        log "No test manifest found, skipping reference generation"
+        return 0
+    fi
+
+    log "Generating ground-truth references for test set..."
+    mark_in_progress "$step_name"
+
+    mkdir -p "$TEST_REFS"
+    python "$DIR_PATH/generate_test_refs.py" \
+        --manifest-dir "$MANIFEST_NONSIL_DIR" \
+        --librispeech-dir "$(dirname "$DIR_PATH")/data/audio/LibriSpeech" \
+        --output-dir "$TEST_REFS"
+
+    if [ $? -eq 0 ]; then
+        mark_completed "$step_name"
+        log "Test references generated successfully"
+    else
+        log "ERROR: Test reference generation failed"
+        exit 1
+    fi
+}
+
 #Step 5: Prepare audio file
 prepare_audio() {
 
@@ -351,7 +504,7 @@ prepare_audio() {
     log "audio preparation"
     mark_in_progress "$step_name"
 
-    zsh "$FAIRSEQ_ROOT/examples/wav2vec/unsupervised/scripts/prepare_audio.sh" "$MANIFEST_NONSIL_DIR" $CLUSTERING_DIR $MODEL 512 14
+    zsh "$FAIRSEQ_ROOT/examples/wav2vec/unsupervised/scripts/prepare_audio.sh" "$MANIFEST_NONSIL_DIR" "$CLUSTERING_DIR" "$MODEL" 512 14
 
 
     # Check if the command was successful
@@ -381,8 +534,8 @@ prepare_text() {
 
     log "audio preparation."
     mark_in_progress "$step_name"
-    replace_std_endl $ADD_SELF_LOOP_SIMPLE  # this replaces the fixes error caused by the old script std::endl with \n
-    zsh "$FAIRSEQ_ROOT/examples/wav2vec/unsupervised/scripts/prepare_text.sh" $LANG $UNLABELLED_TEXT $TEXT_OUTPUT $MIN_PHONES $PHONEMIZER "$FASTTEXT_LIB_MODEL" 0.25 
+    replace_std_endl "$ADD_SELF_LOOP_SIMPLE"  # this replaces the fixes error caused by the old script std::endl with \n
+    zsh "$FAIRSEQ_ROOT/examples/wav2vec/unsupervised/scripts/prepare_text.sh" "$LANG" "$UNLABELLED_TEXT" "$TEXT_OUTPUT" "$MIN_PHONES" "$PHONEMIZER" "$FASTTEXT_LIB_MODEL" 0.25
     # Check if the command was successful
     if [ $? -eq 0 ]; then
         mark_completed "$step_name"
